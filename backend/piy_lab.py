@@ -83,6 +83,7 @@ class LabManager:
     def __init__(self):
         self.app = modal.App.lookup("piy-log4shell", create_if_missing=True)
         self.sessions: dict[str, LabSession] = {}
+        self._pending = 0  # slots reserved by in-flight create() calls
         self._lock = threading.Lock()
 
     def _prune_locked(self):
@@ -93,17 +94,26 @@ class LabManager:
                 sess.terminate()
 
     def create(self) -> LabSession:
+        # Reserve a slot under the lock BEFORE the slow Sandbox.create so
+        # concurrent bursts cannot collectively exceed the cap (live sessions
+        # plus in-flight creations are both counted).
         with self._lock:
             self._prune_locked()
-            if len(self.sessions) >= MAX_CONCURRENT_SESSIONS:
+            if len(self.sessions) + self._pending >= MAX_CONCURRENT_SESSIONS:
                 raise CapacityError(
                     f"server at capacity ({MAX_CONCURRENT_SESSIONS} live labs); try again shortly"
                 )
+            self._pending += 1
         # Create outside the lock: Sandbox.create is slow (network) and must not
-        # block other requests. The cap above may be briefly exceeded under a
-        # burst, which is acceptable for a soft cost guard.
-        s = LabSession(self.app)
+        # block other requests. The reservation above holds our slot meanwhile.
+        try:
+            s = LabSession(self.app)
+        except Exception:
+            with self._lock:
+                self._pending -= 1
+            raise
         with self._lock:
+            self._pending -= 1
             self.sessions[s.id] = s
         return s
 
