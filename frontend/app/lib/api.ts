@@ -10,12 +10,15 @@ export type Block =
       logfile?: string;
     };
 
-export interface Lesson {
+export interface LessonSummary {
   slug: string;
   title: string;
   subtitle: string;
   cve: string;
   meta: string;
+}
+
+export interface Lesson extends LessonSummary {
   blocks: Block[];
 }
 
@@ -25,15 +28,28 @@ export interface ExecResult {
   exit_code: number;
 }
 
-export async function getLesson(): Promise<Lesson> {
-  const r = await fetch('/api/lesson');
+export async function getLessons(): Promise<LessonSummary[]> {
+  const r = await fetch('/api/lessons');
+  if (!r.ok) throw new Error('failed to load lessons');
+  return r.json();
+}
+
+export async function getLesson(slug: string): Promise<Lesson> {
+  const r = await fetch(`/api/lesson/${slug}`);
   if (!r.ok) throw new Error('failed to load lesson');
   return r.json();
 }
 
-export async function startSession(): Promise<{ session_id: string; timeout: number }> {
-  const r = await fetch('/api/session', { method: 'POST' });
-  if (!r.ok) throw new Error('failed to start lab');
+export async function startSession(slug: string): Promise<{ session_id: string; slug: string; timeout: number }> {
+  const r = await fetch('/api/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug }),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.detail || 'failed to start lab');
+  }
   return r.json();
 }
 

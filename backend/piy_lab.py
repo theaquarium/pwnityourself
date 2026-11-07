@@ -1,36 +1,20 @@
-"""Shared Modal lab definition and session wrapper for PIY (Pwn It Yourself).
+"""Modal session management for PIY, shared across all labs.
 
-This module owns everything that talks to Modal: the lab image (an intentionally
-vulnerable Log4Shell target plus the attacker tooling, all pre-compiled) and a
-LabSession wrapper around a single throwaway Modal Sandbox.
+This module owns everything that talks to Modal. Each lab (see the `lessons`
+package) supplies its own vulnerable-target image; this manager creates one
+throwaway Modal Sandbox per user session from the right image and runs the
+notebook cells' shell commands inside it.
 """
 import os
 import time
 import uuid
 import threading
+
 import modal
 
-LAB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lab")
-LAB_DIR = os.path.abspath(LAB_DIR)
+from lessons import get_module
 
-# Classpaths inside the sandbox.
-VICTIM_CP = "/lab/build:/lab/jars/*:/lab/config"
-ATTACKER_CP = "/lab/build:/lab/jars/*"
-
-image = (
-    modal.Image.from_registry("openjdk:8u181-jdk-stretch", add_python=None)
-    .add_local_dir(os.path.join(LAB_DIR, "jars"), "/lab/jars", copy=True)
-    .add_local_dir(os.path.join(LAB_DIR, "src"), "/lab/src", copy=True)
-    .run_commands(
-        "mkdir -p /lab/build /lab/www /lab/config",
-        "cp /lab/src/log4j2.xml /lab/config/",
-        "javac -cp '/lab/jars/*' -d /lab/build /lab/src/VulnerableApp.java",
-        "javac -cp '/lab/jars/*' -d /lab/build /lab/src/LDAPRefServer.java /lab/src/FileServer.java",
-        "javac -d /lab/www /lab/src/Exploit.java",
-    )
-)
-
-SANDBOX_TIMEOUT = 900  # seconds; box self-destructs after this
+SANDBOX_TIMEOUT_DEFAULT = 900  # seconds; box self-destructs after this
 # Cap on concurrent live sandboxes across the whole backend. Each sandbox is a
 # paid Modal container, so this bounds cost/abuse from anonymous callers.
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("PIY_MAX_SESSIONS", "25"))
@@ -40,17 +24,22 @@ class CapacityError(Exception):
     """Raised when the concurrent-session cap is reached."""
 
 
+class UnknownLabError(Exception):
+    """Raised when a session is requested for a lab slug we don't have."""
+
+
 class LabSession:
     """Wraps one Modal Sandbox for one user's lab session."""
 
-    def __init__(self, app):
+    def __init__(self, module, app, image):
         self.id = uuid.uuid4().hex[:12]
-        self._app = app
+        self.slug = module.SLUG
         self._lock = threading.Lock()
         self.created_at = time.time()
-        self.expires_at = self.created_at + SANDBOX_TIMEOUT
+        self.timeout = getattr(module, "SANDBOX_TIMEOUT", SANDBOX_TIMEOUT_DEFAULT)
+        self.expires_at = self.created_at + self.timeout
         self.sandbox = modal.Sandbox.create(
-            "sleep", "infinity", image=image, app=app, timeout=SANDBOX_TIMEOUT
+            "sleep", "infinity", image=image, app=app, timeout=self.timeout
         )
 
     def is_expired(self) -> bool:
@@ -81,19 +70,37 @@ class LabSession:
 
 class LabManager:
     def __init__(self):
-        self.app = modal.App.lookup("piy-log4shell", create_if_missing=True)
         self.sessions: dict[str, LabSession] = {}
         self._pending = 0  # slots reserved by in-flight create() calls
         self._lock = threading.Lock()
+        # Per-lab Modal app + image, built lazily and reused across sessions.
+        self._apps: dict[str, modal.App] = {}
+        self._images: dict[str, modal.Image] = {}
+        self._res_lock = threading.Lock()
+
+    def _resources(self, module):
+        with self._res_lock:
+            app = self._apps.get(module.APP_NAME)
+            if app is None:
+                app = modal.App.lookup(module.APP_NAME, create_if_missing=True)
+                self._apps[module.APP_NAME] = app
+            image = self._images.get(module.SLUG)
+            if image is None:
+                image = module.build_image()
+                self._images[module.SLUG] = image
+            return app, image
 
     def _prune_locked(self):
-        """Drop and terminate expired sessions. Caller holds the lock."""
+        """Drop and terminate expired sessions. Caller holds self._lock."""
         for sid in [s for s, sess in self.sessions.items() if sess.is_expired()]:
             sess = self.sessions.pop(sid, None)
             if sess:
                 sess.terminate()
 
-    def create(self) -> LabSession:
+    def create(self, slug: str) -> LabSession:
+        module = get_module(slug)
+        if module is None:
+            raise UnknownLabError(slug)
         # Reserve a slot under the lock BEFORE the slow Sandbox.create so
         # concurrent bursts cannot collectively exceed the cap (live sessions
         # plus in-flight creations are both counted).
@@ -107,7 +114,8 @@ class LabManager:
         # Create outside the lock: Sandbox.create is slow (network) and must not
         # block other requests. The reservation above holds our slot meanwhile.
         try:
-            s = LabSession(self.app)
+            app, image = self._resources(module)
+            s = LabSession(module, app, image)
         except Exception:
             with self._lock:
                 self._pending -= 1

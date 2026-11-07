@@ -30,7 +30,7 @@ export default function RunCell({
   }
 
   const output = result ? (result.stdout + (result.stderr ? '\n' + result.stderr : '')).trimEnd() : '';
-  const pwned = /uid=0\(root\)/.test(output);
+  const pwned = /uid=\d+\(/.test(output);
 
   return (
     <div className="run-cell">

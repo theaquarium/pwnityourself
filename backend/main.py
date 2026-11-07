@@ -2,7 +2,8 @@
 
 The browser never touches Modal. This FastAPI service holds the Modal token,
 spins up a throwaway Sandbox per lab session, and runs the notebook cells'
-shell commands inside it on request.
+shell commands inside it on request. It serves multiple exploit labs; each is
+a module in the `lessons` package.
 """
 import os
 
@@ -10,8 +11,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from piy_lab import LabManager, CapacityError
-from lesson import build_lesson
+from piy_lab import LabManager, CapacityError, UnknownLabError
+import lessons
 
 app = FastAPI(title="PIY API")
 
@@ -41,23 +42,37 @@ class ExecBody(BaseModel):
     logfile: str | None = None
 
 
+class SessionBody(BaseModel):
+    slug: str
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "sessions": len(manager.sessions)}
 
 
-@app.get("/api/lesson")
-def lesson():
-    return build_lesson()
+@app.get("/api/lessons")
+def list_lessons():
+    return lessons.list_summaries()
+
+
+@app.get("/api/lesson/{slug}")
+def lesson(slug: str):
+    module = lessons.get_module(slug)
+    if module is None:
+        raise HTTPException(status_code=404, detail="lesson not found")
+    return module.build_lesson()
 
 
 @app.post("/api/session")
-def create_session():
+def create_session(body: SessionBody):
     try:
-        s = manager.create()
+        s = manager.create(body.slug)
+    except UnknownLabError:
+        raise HTTPException(status_code=404, detail=f"unknown lab '{body.slug}'")
     except CapacityError as e:
         raise HTTPException(status_code=429, detail=str(e))
-    return {"session_id": s.id, "timeout": 900}
+    return {"session_id": s.id, "slug": s.slug, "timeout": s.timeout}
 
 
 @app.post("/api/session/{sid}/exec")

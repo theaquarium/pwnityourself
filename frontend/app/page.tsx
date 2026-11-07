@@ -1,145 +1,51 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
-import {
-  getLesson,
-  startSession,
-  endSession,
-  execCell,
-  type Lesson,
-  type Block,
-  type ExecResult,
-} from './lib/api';
-import Markdown from './components/Markdown';
-import CodeBlock from './components/CodeBlock';
-import RunCell from './components/RunCell';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { getLessons, type LessonSummary } from './lib/api';
 
-type Status = 'idle' | 'booting' | 'ready' | 'error';
-type RunBlock = Extract<Block, { type: 'run' }>;
-
-export default function Page() {
-  const [lesson, setLesson] = useState<Lesson | null>(null);
-  const [status, setStatus] = useState<Status>('idle');
-  const [sid, setSid] = useState<string | null>(null);
-  const [remaining, setRemaining] = useState<number>(0);
+export default function Home() {
+  const [lessons, setLessons] = useState<LessonSummary[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    getLesson().then(setLesson).catch(() => setErr('Could not load the lesson.'));
+    getLessons().then(setLessons).catch(() => setErr('Could not load the labs.'));
   }, []);
-
-  useEffect(() => {
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
-  }, []);
-
-  async function startLab() {
-    setStatus('booting');
-    setErr(null);
-    try {
-      const s = await startSession();
-      setSid(s.session_id);
-      setStatus('ready');
-      setRemaining(s.timeout);
-      if (timer.current) clearInterval(timer.current);
-      timer.current = setInterval(() => {
-        setRemaining((r) => {
-          if (r <= 1) {
-            if (timer.current) clearInterval(timer.current);
-            setStatus('idle');
-            setSid(null);
-            return 0;
-          }
-          return r - 1;
-        });
-      }, 1000);
-    } catch (e) {
-      setStatus('error');
-      setErr(e instanceof Error ? e.message : 'Failed to start the lab.');
-    }
-  }
-
-  async function resetLab() {
-    if (sid) await endSession(sid).catch(() => {});
-    if (timer.current) clearInterval(timer.current);
-    setSid(null);
-    setStatus('idle');
-    setRemaining(0);
-  }
-
-  async function runCell(b: RunBlock): Promise<ExecResult> {
-    if (!sid) throw new Error('No active lab session.');
-    return execCell(sid, {
-      command: b.command,
-      background: b.kind === 'background',
-      logfile: b.logfile ?? null,
-    });
-  }
-
-  const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
-  const ss = String(remaining % 60).padStart(2, '0');
-
-  const statusLabel =
-    status === 'idle' ? 'No lab running'
-    : status === 'booting' ? 'Spinning up sandbox…'
-    : status === 'ready' ? `Sandbox live · ${mm}:${ss}`
-    : 'Error';
 
   return (
     <>
       <header className="site-header">
         <div className="inner">
-          <div className="brand">
+          <Link href="/" className="brand">
             <span className="mark">PIY</span>
             <span className="sub">Pwn It Yourself</span>
-          </div>
-          <div className="header-right">
-            <span className="status">
-              <span className={`dot ${status}`} />
-              {statusLabel}
-            </span>
-            {status === 'ready' ? (
-              <button className="btn ghost" onClick={resetLab}>Reset lab</button>
-            ) : (
-              <button className="btn primary" onClick={startLab} disabled={status === 'booting'}>
-                {status === 'booting' ? 'Starting…' : 'Start lab'}
-              </button>
-            )}
-          </div>
+          </Link>
         </div>
       </header>
 
-      {status === 'ready' && sid ? (
-        <div className="lab-banner">
-          <div className="inner">
-            <span>Live sandbox <code>{sid}</code> — an isolated throwaway container. It self-destructs when the timer runs out.</span>
-          </div>
-        </div>
-      ) : null}
-
       <main className="article">
+        <div className="title-block">
+          <h1>Pwn It Yourself</h1>
+          <p className="subtitle">
+            Interactive, hands-on walkthroughs of real software exploits. Each lab spins up a real,
+            deliberately-vulnerable target in an isolated sandbox and lets you fire the exploit yourself,
+            step by step, and watch the victim execute your commands.
+          </p>
+        </div>
+
         {err ? <p style={{ color: '#b22a2f' }}>{err}</p> : null}
-        {!lesson ? (
+        {!lessons ? (
           <p className="hint">Loading…</p>
         ) : (
-          <>
-            <div className="title-block">
-              <span className="cve-tag">{lesson.cve}</span>
-              <h1>{lesson.title}</h1>
-              <p className="subtitle">{lesson.subtitle}</p>
-              <p className="meta">{lesson.meta}</p>
-            </div>
-
-            {lesson.blocks.map((b, i) => {
-              if (b.type === 'markdown') return <Markdown key={i} content={b.content} />;
-              if (b.type === 'code')
-                return <CodeBlock key={i} title={b.title} language={b.language} content={b.content} />;
-              if (b.type === 'run')
-                return <RunCell key={`${sid ?? 'none'}-${i}`} block={b} enabled={status === 'ready'} onRun={runCell} />;
-              return null;
-            })}
-          </>
+          <div className="lesson-list">
+            {lessons.map((l) => (
+              <Link key={l.slug} href={`/lesson/${l.slug}`} className="lesson-card">
+                <span className="cve-tag">{l.cve}</span>
+                <h2>{l.title}</h2>
+                <p className="lc-sub">{l.subtitle}</p>
+                <p className="meta">{l.meta}</p>
+              </Link>
+            ))}
+          </div>
         )}
       </main>
     </>

