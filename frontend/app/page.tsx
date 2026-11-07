@@ -54,9 +54,9 @@ export default function Page() {
           return r - 1;
         });
       }, 1000);
-    } catch (e: any) {
+    } catch (e) {
       setStatus('error');
-      setErr(e.message || 'Failed to start the lab.');
+      setErr(e instanceof Error ? e.message : 'Failed to start the lab.');
     }
   }
 

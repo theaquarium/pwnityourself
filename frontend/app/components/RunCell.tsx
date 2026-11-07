@@ -22,8 +22,8 @@ export default function RunCell({
     setError(null);
     try {
       setResult(await onRun(block));
-    } catch (e: any) {
-      setError(e.message || 'failed');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed');
     } finally {
       setRunning(false);
     }
