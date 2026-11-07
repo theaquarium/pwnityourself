@@ -5,6 +5,7 @@ vulnerable Log4Shell target plus the attacker tooling, all pre-compiled) and a
 LabSession wrapper around a single throwaway Modal Sandbox.
 """
 import os
+import time
 import uuid
 import threading
 import modal
@@ -30,6 +31,13 @@ image = (
 )
 
 SANDBOX_TIMEOUT = 900  # seconds; box self-destructs after this
+# Cap on concurrent live sandboxes across the whole backend. Each sandbox is a
+# paid Modal container, so this bounds cost/abuse from anonymous callers.
+MAX_CONCURRENT_SESSIONS = int(os.environ.get("PIY_MAX_SESSIONS", "25"))
+
+
+class CapacityError(Exception):
+    """Raised when the concurrent-session cap is reached."""
 
 
 class LabSession:
@@ -39,9 +47,14 @@ class LabSession:
         self.id = uuid.uuid4().hex[:12]
         self._app = app
         self._lock = threading.Lock()
+        self.created_at = time.time()
+        self.expires_at = self.created_at + SANDBOX_TIMEOUT
         self.sandbox = modal.Sandbox.create(
             "sleep", "infinity", image=image, app=app, timeout=SANDBOX_TIMEOUT
         )
+
+    def is_expired(self) -> bool:
+        return time.time() >= self.expires_at
 
     def exec(self, command: str, timeout: int = 60):
         """Run a shell command in the sandbox and return combined result."""
@@ -72,14 +85,36 @@ class LabManager:
         self.sessions: dict[str, LabSession] = {}
         self._lock = threading.Lock()
 
+    def _prune_locked(self):
+        """Drop and terminate expired sessions. Caller holds the lock."""
+        for sid in [s for s, sess in self.sessions.items() if sess.is_expired()]:
+            sess = self.sessions.pop(sid, None)
+            if sess:
+                sess.terminate()
+
     def create(self) -> LabSession:
+        with self._lock:
+            self._prune_locked()
+            if len(self.sessions) >= MAX_CONCURRENT_SESSIONS:
+                raise CapacityError(
+                    f"server at capacity ({MAX_CONCURRENT_SESSIONS} live labs); try again shortly"
+                )
+        # Create outside the lock: Sandbox.create is slow (network) and must not
+        # block other requests. The cap above may be briefly exceeded under a
+        # burst, which is acceptable for a soft cost guard.
         s = LabSession(self.app)
         with self._lock:
             self.sessions[s.id] = s
         return s
 
     def get(self, sid: str) -> LabSession | None:
-        return self.sessions.get(sid)
+        with self._lock:
+            s = self.sessions.get(sid)
+            if s and s.is_expired():
+                self.sessions.pop(sid, None)
+                s.terminate()
+                return None
+            return s
 
     def destroy(self, sid: str):
         with self._lock:

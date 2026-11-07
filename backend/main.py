@@ -4,18 +4,30 @@ The browser never touches Modal. This FastAPI service holds the Modal token,
 spins up a throwaway Sandbox per lab session, and runs the notebook cells'
 shell commands inside it on request.
 """
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from piy_lab import LabManager
+from piy_lab import LabManager, CapacityError
 from lesson import build_lesson
 
 app = FastAPI(title="PIY API")
 
+# The frontend talks to this API same-origin via Next's /api rewrite, so no
+# cross-origin access is needed in normal use. Keep the allowlist tight; add
+# extra origins via PIY_ALLOWED_ORIGINS (comma-separated) if ever needed.
+_default_origins = "http://localhost:3000,http://127.0.0.1:3000"
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("PIY_ALLOWED_ORIGINS", _default_origins).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # dev; tighten for production
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -41,7 +53,10 @@ def lesson():
 
 @app.post("/api/session")
 def create_session():
-    s = manager.create()
+    try:
+        s = manager.create()
+    except CapacityError as e:
+        raise HTTPException(status_code=429, detail=str(e))
     return {"session_id": s.id, "timeout": 900}
 
 

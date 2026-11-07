@@ -136,7 +136,7 @@ export default function Page() {
               if (b.type === 'code')
                 return <CodeBlock key={i} title={b.title} language={b.language} content={b.content} />;
               if (b.type === 'run')
-                return <RunCell key={i} block={b} enabled={status === 'ready'} onRun={runCell} />;
+                return <RunCell key={`${sid ?? 'none'}-${i}`} block={b} enabled={status === 'ready'} onRun={runCell} />;
               return null;
             })}
           </>
